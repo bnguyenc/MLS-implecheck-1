@@ -1,0 +1,17 @@
+import ttk 
+import 
+from dataclasses import dataclass, field
+from datetime import datetime
+from tkinter import messagebox, ttk
+from typing import Dict, List, Optional
+
+APP_TITLE = "MESSAGING DEMO 1 - MLS IMPLEMENT TESTING"
+LOCAL_USER = "Bạn"
+AUTO_REPLY_POOL = [
+    " bloh bleh blah.",
+    "blah!",
+    "Bleh bleh bleh.",
+    "Bhel ? blah bleh blah, blah blah !.",
+    "blah, blah blah blah blah, blah blah, bleh.",
+]
+SUGGESTED_MEMBERS = ["Linh", "Minh", "Nguyên", "An", "Quân", "Đức"]
