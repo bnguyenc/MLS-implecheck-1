@@ -1,5 +1,10 @@
-import ttk 
-import 
+import tkinter as tk
+import sys
+import random
+import hmac
+import base64
+import hasblib
+import secrets
 from dataclasses import dataclass, field
 from datetime import datetime
 from tkinter import messagebox, ttk
@@ -15,3 +20,156 @@ AUTO_REPLY_POOL = [
     "blah, blah blah blah blah, blah blah, bleh.",
 ]
 SUGGESTED_MEMBERS = ["Linh", "Minh", "Nguyên", "An", "Quân", "Đức"]
+
+def now_str () -> str: 
+  return datetime.now().strftime("%H:%M:%S")
+
+b64e(data: bytes) -> str:
+  return base64.b64encode(data).decode("ascii")
+
+
+def b64d(data: str) -> bytes:
+    return base64.b64decode(data.encode("ascii"))
+
+
+def derive_key(secret: bytes, label: str) -> bytes:
+    return hmac.new(secret, label.encode("utf-8"), hashlib.sha256).digest()
+
+
+def xor_stream(key: bytes, nonce: bytes, data: bytes) -> bytes:
+    """Toy stream cipher for demo only. Do NOT use in production."""
+    out = bytearray()
+    counter = 0
+    while len(out) < len(data):
+        block = hmac.new(
+            key,
+            nonce + counter.to_bytes(4, "big"),
+            hashlib.sha256,
+        ).digest()
+        out.extend(block)
+        counter += 1
+    stream = out[: len(data)]
+    return bytes(a ^ b for a, b in zip(data, stream))
+
+
+@dataclass
+class EncryptedMessage:
+    sender: str
+    epoch: int
+    seq: int
+    nonce_b64: str
+    ciphertext_b64: str
+    tag_hex: str
+    time_text: str
+    room_name: str
+    kind: str = "cipher"
+    meta_text: str = ""
+
+
+@dataclass
+class SystemEvent:
+    text: str
+    time_text: str
+    kind: str = "system"
+
+
+@dataclass
+class ToyMLSRoom:
+    name: str
+    members: List[str]
+    epoch: int = 1
+    sequence: int = 0
+    _secret: bytes = field(default_factory=lambda: secrets.token_bytes(32))
+    epoch_secrets: Dict[int, bytes] = field(default_factory=dict)
+    timeline: List[object] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        self.epoch_secrets[self.epoch] = self._secret
+        self.add_system_event(
+            f"Room khởi tạo với epoch {self.epoch}. Thành viên ban đầu: {', '.join(self.members)}"
+        )
+
+    def add_system_event(self, text: str) -> None:
+        self.timeline.append(SystemEvent(text=text, time_text=now_str()))
+
+    def _current_secret(self) -> bytes:
+        return self.epoch_secrets[self.epoch]
+
+    def rotate_epoch(self, reason: str) -> None:
+        old_secret = self._current_secret()
+        context = f"{reason}|{self.name}|{'|'.join(sorted(self.members))}|{now_str()}".encode(
+            "utf-8"
+        )
+        new_secret = hmac.new(old_secret, b"epoch|" + context, hashlib.sha256).digest()
+        self.epoch += 1
+        self.epoch_secrets[self.epoch] = new_secret
+        self._secret = new_secret
+        self.add_system_event(f"Epoch đổi sang {self.epoch} ({reason}).")
+
+    def add_member(self, name: str) -> bool:
+        cleaned = name.strip()
+        if not cleaned or cleaned in self.members:
+            return False
+        self.members.append(cleaned)
+        self.rotate_epoch(f"add member: {cleaned}")
+        return True
+
+    def remove_member(self, name: str) -> bool:
+        cleaned = name.strip()
+        if cleaned == LOCAL_USER or cleaned not in self.members:
+            return False
+        self.members.remove(cleaned)
+        self.rotate_epoch(f"remove member: {cleaned}")
+        return True
+
+    def encrypt_message(self, sender: str, plaintext: str) -> EncryptedMessage:
+        secret = self._current_secret()
+        enc_key = derive_key(secret, "enc")
+        mac_key = derive_key(secret, "mac")
+        nonce = secrets.token_bytes(16)
+        aad = f"{self.name}|{self.epoch}|{sender}|{self.sequence}".encode("utf-8")
+        plaintext_bytes = plaintext.encode("utf-8")
+        ciphertext = xor_stream(enc_key, nonce, plaintext_bytes)
+        tag = hmac.new(mac_key, aad + nonce + ciphertext, hashlib.sha256).hexdigest()
+        msg = EncryptedMessage(
+            sender=sender,
+            epoch=self.epoch,
+            seq=self.sequence,
+            nonce_b64=b64e(nonce),
+            ciphertext_b64=b64e(ciphertext),
+            tag_hex=tag,
+            time_text=now_str(),
+            room_name=self.name,
+            meta_text=f"epoch={self.epoch}; seq={self.sequence}",
+        )
+        self.sequence += 1
+        self.timeline.append(msg)
+        return msg
+
+    def decrypt_message(self, msg: EncryptedMessage) -> str:
+        secret = self.epoch_secrets.get(msg.epoch)
+        if secret is None:
+            return "[Không có secret của epoch này để giải mã]"
+        enc_key = derive_key(secret, "enc")
+        mac_key = derive_key(secret, "mac")
+        nonce = b64d(msg.nonce_b64)
+        ciphertext = b64d(msg.ciphertext_b64)
+        aad = f"{msg.room_name}|{msg.epoch}|{msg.sender}|{msg.seq}".encode("utf-8")
+        expected_tag = hmac.new(mac_key, aad + nonce + ciphertext, hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(expected_tag, msg.tag_hex):
+            return "[Tin nhắn không hợp lệ: MAC mismatch]"
+        plaintext = xor_stream(enc_key, nonce, ciphertext)
+        try:
+            return plaintext.decode("utf-8")
+        except UnicodeDecodeError:
+            return "[Giải mã lỗi]"
+
+    def last_preview(self) -> str:
+        if not self.timeline:
+            return ""
+        last = self.timeline[-1]
+        if isinstance(last, SystemEvent):
+            return last.text
+        if isinstance(last, EncryptedMessage):
+            return self.decrypt_message(last)
+        return ""
